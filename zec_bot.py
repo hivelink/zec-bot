@@ -19,8 +19,13 @@ import time
 import requests
 
 # ================= KONFIGURASI UTAMA =================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
+def _clean(v):
+    """Buang spasi/newline/tanda kutip yang sering ikut saat copy-paste."""
+    return (v or "").strip().strip("'\"").strip()
+
+
+BOT_TOKEN = _clean(os.getenv("BOT_TOKEN"))
+CHAT_ID = _clean(os.getenv("CHAT_ID"))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))  # detik
 COOLDOWN_SECONDS = int(float(os.getenv("COOLDOWN_HOURS", "6")) * 3600)
 STATE_FILE = os.getenv("STATE_FILE", "alert_state.json")
@@ -113,32 +118,74 @@ def send_telegram(text):
 
 
 # ---------------------- Harga ----------------------
+_fx = {"rate": None, "ts": 0.0}
+
+
+def get_usd_idr():
+    """Kurs USD->IDR (cache 1 jam); jatuh ke FALLBACK_USD_IDR jika gagal."""
+    if _fx["rate"] and time.time() - _fx["ts"] < 3600:
+        return _fx["rate"]
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
+        _fx["rate"], _fx["ts"] = float(r.json()["rates"]["IDR"]), time.time()
+        return _fx["rate"]
+    except Exception as e:
+        log.warning("Kurs IDR gagal (%s), pakai FALLBACK_USD_IDR", type(e).__name__)
+        return FALLBACK_USD_IDR
+
+
+def _src_coingecko():
+    r = requests.get(
+        "https://api.coingecko.com/api/v3/simple/price",
+        params={"ids": "zcash", "vs_currencies": "usd,idr"},
+        timeout=10,
+    )
+    d = r.json()["zcash"]
+    return float(d["usd"]), float(d["idr"])
+
+
+def _src_coinbase():
+    r = requests.get("https://api.coinbase.com/v2/prices/ZEC-USD/spot", timeout=10)
+    return float(r.json()["data"]["amount"]), None
+
+
+def _src_kraken():
+    r = requests.get(
+        "https://api.kraken.com/0/public/Ticker", params={"pair": "ZECUSD"}, timeout=10
+    )
+    res = r.json()["result"]
+    return float(next(iter(res.values()))["c"][0]), None
+
+
+def _src_binance():
+    r = requests.get(
+        "https://api.binance.com/api/v3/ticker/price",
+        params={"symbol": "ZECUSDT"},
+        timeout=10,
+    )
+    return float(r.json()["price"]), None
+
+
+PRICE_SOURCES = [
+    ("CoinGecko", _src_coingecko),
+    ("Coinbase", _src_coinbase),
+    ("Kraken", _src_kraken),
+    ("Binance", _src_binance),
+]
+
+
 def get_zec_price():
     """Return (usd, idr, sumber) atau (None, None, None)."""
-    # Sumber utama: CoinGecko (USD & IDR)
-    try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "zcash", "vs_currencies": "usd,idr"},
-            timeout=10,
-        )
-        data = r.json()
-        return float(data["zcash"]["usd"]), float(data["zcash"]["idr"]), "CoinGecko"
-    except Exception as e:
-        log.warning("CoinGecko gagal (%s), coba Binance", e)
-
-    # Sumber cadangan: Binance (ZECUSDT)
-    try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": "ZECUSDT"},
-            timeout=10,
-        )
-        usd = float(r.json()["price"])
-        return usd, usd * FALLBACK_USD_IDR, "Binance"
-    except Exception as e:
-        log.error("Gagal mengambil harga ZEC: %s", e)
-        return None, None, None
+    for name, fn in PRICE_SOURCES:
+        try:
+            usd, idr = fn()
+            if idr is None:
+                idr = usd * get_usd_idr()
+            return usd, idr, name
+        except Exception as e:
+            log.warning("Sumber harga %s gagal: %s", name, type(e).__name__)
+    log.error("Semua sumber harga ZEC gagal")
+    return None, None, None
 
 
 def format_status_message(usd, idr, source):
@@ -259,6 +306,12 @@ def self_test():
         ("Telegram getMe", f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"),
         ("CoinGecko", "https://api.coingecko.com/api/v3/ping"),
     ]
+    head, sep, tail = BOT_TOKEN.partition(":")
+    log.info(
+        "SELFTEST bentuk token: panjang=%d, titik-dua=%d, depan-angka=%s(%d digit), belakang=%d karakter, spasi/kutip=%s; chat_id angka=%s",
+        len(BOT_TOKEN), BOT_TOKEN.count(":"), head.isdigit(), len(head), len(tail),
+        any(c in BOT_TOKEN for c in " \t\n\"'"), CHAT_ID.lstrip("-").isdigit(),
+    )
     for name, url in checks:
         t0 = time.time()
         try:

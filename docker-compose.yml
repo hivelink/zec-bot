@@ -1,0 +1,10 @@
+services:
+  zec-bot:
+    build: .
+    container_name: zec-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Asia/Jakarta
+    volumes:
+      - ./data:/data

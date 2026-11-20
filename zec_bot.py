@@ -251,6 +251,22 @@ def command_loop(state):
 
 
 # ---------------------- Main ----------------------
+
+def self_test():
+    """Log diagnosis konektivitas saat start (tidak membocorkan token)."""
+    checks = [
+        ("Telegram (tanpa token)", "https://api.telegram.org/"),
+        ("Telegram getMe", f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"),
+        ("CoinGecko", "https://api.coingecko.com/api/v3/ping"),
+    ]
+    for name, url in checks:
+        t0 = time.time()
+        try:
+            r = requests.get(url, timeout=15)
+            log.info("SELFTEST %s -> HTTP %s dalam %.1fs", name, r.status_code, time.time() - t0)
+        except Exception as e:
+            log.error("SELFTEST %s -> gagal dalam %.1fs: %s", name, time.time() - t0, type(e).__name__)
+
 def main():
     if not BOT_TOKEN or not CHAT_ID:
         raise SystemExit("BOT_TOKEN dan CHAT_ID wajib diisi (lihat .env.example).")
@@ -258,6 +274,7 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: _stop.set())
     signal.signal(signal.SIGINT, lambda *_: _stop.set())
 
+    self_test()
     state = load_state()
     usd, idr, src = get_zec_price()
     if usd is not None:
